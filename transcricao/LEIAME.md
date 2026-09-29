@@ -67,6 +67,9 @@ python transcrever_videos.py "D:\Videos\Pesca"
 - **Pode interromper (Ctrl+C) e rodar de novo:** os vídeos que já têm `.srt`
   são pulados, mas as falas deles continuam entrando no CSV. Use `--refazer`
   para transcrever tudo de novo.
+- Para pular pastas, use `--excluir` com os nomes delas (vale em qualquer
+  nível e não diferencia maiúsculas/minúsculas):
+  `--excluir Editados "outra pasta"`
 - Se algum vídeo der erro (arquivo corrompido, por exemplo), o lote continua
   e a lista de erros aparece no fim.
 - Deixe o `transcricoes.csv` fechado no Excel enquanto o script roda, porque

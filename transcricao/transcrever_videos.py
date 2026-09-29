@@ -119,6 +119,8 @@ def main():
     ap.add_argument("--beam", type=int, default=5)
     ap.add_argument("--csv", type=Path, help="caminho do CSV (padrão: <pasta>/transcricoes.csv)")
     ap.add_argument("--refazer", action="store_true", help="transcreve de novo mesmo se já existir .srt")
+    ap.add_argument("--excluir", nargs="+", default=[], metavar="PASTA",
+                    help="nomes de pastas a ignorar (em qualquer nível dentro da raiz)")
     args = ap.parse_args()
 
     if not shutil.which("ffmpeg"):
@@ -127,7 +129,12 @@ def main():
     if args.arquivo:
         videos = [args.arquivo.resolve()]
     else:
-        videos = sorted(p for p in raiz.rglob("*") if p.suffix.lower() in EXTENSOES and p.is_file())
+        excluir = {n.strip().casefold() for n in args.excluir}
+        videos = sorted(
+            p for p in raiz.rglob("*")
+            if p.suffix.lower() in EXTENSOES and p.is_file()
+            and not excluir & {parte.casefold() for parte in p.relative_to(raiz).parts[:-1]}
+        )
         if args.teste:
             videos = videos[:1]
     if not videos:
