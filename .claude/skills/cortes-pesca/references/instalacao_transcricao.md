@@ -1,5 +1,9 @@
 # Transcrição dos vídeos de pesca (Windows)
 
+> O script `transcrever_videos.py` fica em `scripts/`, dentro da pasta da habilidade.
+> Rode os comandos abaixo a partir dessa pasta. Os vídeos que estiverem dentro
+> de `Editados_IA` (a saída da habilidade) nunca são transcritos.
+
 ## Por que o faster-whisper falhava
 
 O `pip` tentou compilar o pacote `av` a partir do código-fonte. Isso acontece

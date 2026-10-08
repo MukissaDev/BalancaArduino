@@ -26,6 +26,7 @@ import numpy as np
 
 EXTENSOES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mts", ".3gp", ".wmv", ".webm"}
 TAXA = 16000
+PASTA_SAIDA = "Editados_IA"  # onde os cortes são salvos; nunca é transcrita/analisada
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -44,6 +45,16 @@ def importar_faster_whisper():
     from faster_whisper import WhisperModel
 
     return WhisperModel
+
+
+def listar_videos(raiz: Path, excluir=()):
+    """Vídeos sob `raiz` (recursivo), pulando pastas com nome em `excluir` e a PASTA_SAIDA."""
+    excluir = {n.strip().casefold() for n in excluir} | {PASTA_SAIDA.casefold()}
+    return sorted(
+        p for p in raiz.rglob("*")
+        if p.suffix.lower() in EXTENSOES and p.is_file()
+        and not excluir & {parte.casefold() for parte in p.relative_to(raiz).parts[:-1]}
+    )
 
 
 def ler_audio(caminho: Path) -> np.ndarray:
@@ -129,12 +140,7 @@ def main():
     if args.arquivo:
         videos = [args.arquivo.resolve()]
     else:
-        excluir = {n.strip().casefold() for n in args.excluir}
-        videos = sorted(
-            p for p in raiz.rglob("*")
-            if p.suffix.lower() in EXTENSOES and p.is_file()
-            and not excluir & {parte.casefold() for parte in p.relative_to(raiz).parts[:-1]}
-        )
+        videos = listar_videos(raiz, args.excluir)
         if args.teste:
             videos = videos[:1]
     if not videos:
