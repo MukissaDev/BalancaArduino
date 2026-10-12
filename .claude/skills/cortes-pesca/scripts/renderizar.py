@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from analisar_videos import info_video  # noqa: E402
-from transcrever_videos import PASTA_SAIDA, ler_srt  # noqa: E402
+from transcrever_videos import PASTA_SAIDA, ler_palavras, ler_srt  # noqa: E402
 
 TAMANHOS = {"vertical": (1080, 1920), "horizontal": (1920, 1080)}
 LIMITES = {"shorts": 180, "reels": 180, "tiktok": 600}  # segundos; acima disso só avisa
@@ -48,7 +48,30 @@ def texto_ass(t: str) -> str:
     return t.replace("\\", "/").replace("{", "(").replace("}", ")").replace("\n", "\\N")
 
 
-def montar_ass(clipe, formato, legenda: bool) -> str:
+def grupos_palavras(palavras, maximo=3, pausa=0.5):
+    """Agrupa palavras em blocos curtos de legenda (estilo Reels): até `maximo` palavras,
+    quebrando em pausas e no fim de frase."""
+    grupos, atual = [], []
+    for p in palavras:
+        if atual and (len(atual) >= maximo or p[0] - atual[-1][1] > pausa or atual[-1][2][-1:] in ".!?"):
+            grupos.append(atual)
+            atual = []
+        atual.append(p)
+    return grupos + ([atual] if atual else [])
+
+
+def ajustar_a_fala(ini, fim, palavras, duracao):
+    """Se o corte cai no meio de uma palavra, recua o início / estende o fim para não cortá-la."""
+    novo_ini, novo_fim = ini, fim
+    for a, b, _ in palavras or []:  # compara sempre com o corte original, sem efeito cascata
+        if a < ini < b:
+            novo_ini = max(0.0, a - 0.05)
+        if a < fim < b:
+            novo_fim = min(duracao, b + 0.15)
+    return novo_ini, novo_fim
+
+
+def montar_ass(clipe, formato, legenda) -> str:
     w, h = TAMANHOS[formato]
     vertical = formato == "vertical"
     cab = f"""[Script Info]
@@ -67,12 +90,24 @@ Style: Topo,Arial,{84 if vertical else 64},&H0000FFFF,&H0000FFFF,&H00000000,&H80
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     ini, fim, vel, dur = clipe["ini"], clipe["fim"], clipe["vel"], clipe["dur"]
+
+    def rel(t):  # tempo no vídeo de origem -> tempo dentro do clipe
+        return min(max((t - ini) / vel, 0.0), dur)
+
     eventos = []
-    if legenda:
+    if legenda == "palavras" and clipe["palavras"]:
+        for grupo in grupos_palavras([p for p in clipe["palavras"] if p[1] > ini and p[0] < fim]):
+            for k, (a, b, _) in enumerate(grupo):
+                fim_ev = grupo[k + 1][0] if k + 1 < len(grupo) else b
+                texto = " ".join(("{\\c&H00FFFF&}" + texto_ass(w) + "{\\c&HFFFFFF&}") if j == k else texto_ass(w)
+                                 for j, (_, _, w) in enumerate(grupo))
+                if rel(fim_ev) - rel(a) >= 0.05:
+                    eventos.append(f"Dialogue: 0,{tempo_ass(rel(a))},{tempo_ass(rel(fim_ev))},Legenda,,0,0,0,,{texto}")
+    elif legenda:
         for a, b, txt in clipe["falas"]:
             a, b = max(a, ini), min(b, fim)
             if b - a >= 0.2:
-                eventos.append(f"Dialogue: 0,{tempo_ass((a - ini) / vel)},{tempo_ass((b - ini) / vel)},Legenda,,0,0,0,,{texto_ass(txt)}")
+                eventos.append(f"Dialogue: 0,{tempo_ass(rel(a))},{tempo_ass(rel(b))},Legenda,,0,0,0,,{texto_ass(txt)}")
     if clipe.get("texto_tela"):
         eventos.append(f"Dialogue: 1,{tempo_ass(0)},{tempo_ass(dur)},Topo,,0,0,0,,{texto_ass(clipe['texto_tela'])}")
     return cab + "\n".join(eventos) + "\n"
@@ -131,11 +166,19 @@ def preparar(plano_path: Path):
                 erros.append(f"{ref}: arquivo não encontrado: {arq}")
                 continue
             if arq not in cache:
-                srt = arq.with_suffix(".srt")
-                cache[arq] = (info_video(arq), ler_srt(srt) if srt.exists() else [])
-            info, falas = cache[arq]
+                srt, segs = arq.with_suffix(".srt"), ler_palavras(arq)
+                falas = [(a, b, t) for a, b, t, _ in segs] if segs else (ler_srt(srt) if srt.exists() else [])
+                palavras = [p for *_, ps in segs for p in ps] if segs else None
+                cache[arq] = (info_video(arq), falas, palavras)
+            info, falas, palavras = cache[arq]
             ini, fim = segundos(cl.get("inicio", 0)), segundos(cl.get("fim", info["duracao"]))
             fim = min(fim, info["duracao"])
+            if c.get("ajustar_fala", True):
+                novo = ajustar_a_fala(ini, fim, palavras, info["duracao"])
+                if novo != (ini, fim):
+                    avisos.append(f"{ref}: ajustado de {ini:.2f}–{fim:.2f} para {novo[0]:.2f}–{novo[1]:.2f} s "
+                                  "para não cortar palavra")
+                    ini, fim = novo
             vel = float(cl.get("velocidade", 1))
             if not 0.5 <= vel <= 2:
                 erros.append(f"{ref}: velocidade {vel} fora de 0.5–2")
@@ -148,6 +191,7 @@ def preparar(plano_path: Path):
                 "enquadramento": cl.get("enquadramento", "corte"),
                 "centro_x": min(max(float(cl.get("centro_x", 0.5)), 0.0), 1.0),
                 "texto_tela": cl.get("texto_tela", ""), "tem_audio": info["tem_audio"], "falas": falas,
+                "palavras": palavras,
             })
         if not clipes:
             erros.append(f"{nome}: nenhum clipe válido")
@@ -157,8 +201,13 @@ def preparar(plano_path: Path):
             lim = LIMITES.get(str(p).lower())
             if lim and dur > lim:
                 avisos.append(f"{nome}: {dur:.0f} s passa do limite de {lim} s do {p}")
-        cortes.append({**c, "nome": nome, "formato": formato, "clipes": clipes, "dur": dur,
-                       "legenda": c.get("legenda", True)})
+        legenda = c.get("legenda", True)
+        if legenda is True:  # padrão: palavra a palavra no vertical, frase inteira no horizontal
+            legenda = "palavras" if formato == "vertical" else "frases"
+        if legenda not in (False, "palavras", "frases"):
+            erros.append(f"{nome}: legenda '{legenda}' inválida (use true, false, \"palavras\" ou \"frases\")")
+            continue
+        cortes.append({**c, "nome": nome, "formato": formato, "clipes": clipes, "dur": dur, "legenda": legenda})
     return raiz, cortes, avisos, erros
 
 
@@ -219,7 +268,7 @@ def main():
 
     raiz, cortes, avisos, erros = preparar(args.plano.resolve())
     for a in avisos:
-        print(f"AVISO: {a}")
+        print(f"{'AJUSTE' if 'para não cortar palavra' in a else 'AVISO'}: {a}")
     for e in erros:
         print(f"ERRO NO PLANO: {e}")
     print(f"{len(cortes)} corte(s) válidos, {sum(c['dur'] for c in cortes) / 60:.1f} min no total.")

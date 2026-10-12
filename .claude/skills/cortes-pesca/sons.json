@@ -1,0 +1,18 @@
+{
+  "modelo": "laion/clap-htsat-unfused",
+  "janela_s": 5,
+  "passo_s": 2.5,
+  "prob_minima": 0.4,
+  "rotulos": [
+    {"nome": "carretilha", "destaque": true, "prompt": "the loud buzzing whir of a fishing reel drag as line is pulled out fast"},
+    {"nome": "splash", "destaque": true, "prompt": "a big fish splashing and thrashing on the water surface"},
+    {"nome": "grito", "destaque": true, "prompt": "people shouting and yelling excitedly"},
+    {"nome": "risada", "destaque": true, "prompt": "people laughing"},
+    {"nome": "comemoração", "destaque": true, "prompt": "people cheering and celebrating"},
+    {"nome": "música", "destaque": true, "prompt": "music playing"},
+    {"nome": "motor", "destaque": false, "prompt": "a boat outboard motor engine running"},
+    {"nome": "vento", "destaque": false, "prompt": "strong wind noise blowing into a microphone"},
+    {"nome": "fala calma", "destaque": false, "prompt": "a person talking calmly"},
+    {"nome": "ambiente", "destaque": false, "prompt": "quiet nature ambience with calm water and birds"}
+  ]
+}

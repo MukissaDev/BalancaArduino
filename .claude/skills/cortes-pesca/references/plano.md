@@ -40,7 +40,8 @@ segundos (`41.5`) ou como `"mm:ss"`, `"mm:ss.s"` ou `"h:mm:ss"`.
 | `plataformas` | `[]` | `shorts`, `reels`, `tiktok`, `youtube`. O script avisa se passar do limite de duração |
 | `titulo`, `descricao`, `hashtags` | vazio | vão para o `<nome>.txt` |
 | `justificativa` | vazio | uma frase explicando a escolha. Vai para o `.txt` e para o `relatorio.md` |
-| `legenda` | `true` | queima as falas do `.srt` de origem no vídeo |
+| `legenda` | `true` | `true` usa `"palavras"` no vertical e `"frases"` no horizontal. `"palavras"`: blocos de até 3 palavras, com a palavra falada em amarelo, no estilo Reels (precisa do `.palavras.json`; sem ele, cai em frases). `"frases"`: a frase inteira do `.srt`. `false`: sem legenda |
+| `ajustar_fala` | `true` | se o início ou o fim cair no meio de uma palavra, estende o trecho até a palavra inteira. O `--validar` mostra cada ajuste |
 | `clipes` | obrigatório | trechos em ordem. Podem vir de vídeos diferentes |
 
 ## Campos do clipe

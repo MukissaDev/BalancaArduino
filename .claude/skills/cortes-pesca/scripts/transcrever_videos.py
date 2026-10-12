@@ -1,10 +1,11 @@
 """Transcreve vídeos em português com faster-whisper, gerando .srt e um CSV.
 
 - O áudio é extraído pelo ffmpeg do sistema (não depende do pacote `av`).
-- Gera um .srt ao lado de cada vídeo.
+- Gera um .srt ao lado de cada vídeo, mais um <video>.palavras.json com o tempo
+  de cada palavra (usado para cortar sem picar palavras e para legenda palavra a palavra).
 - Gera um CSV (separador ';', UTF-8 com BOM para abrir direto no Excel) com
   pescaria, arquivo, inicio, fim, fala. "pescaria" é o nome da pasta do vídeo.
-- Vídeos que já têm .srt são pulados (dá para interromper e retomar), mas as
+- Vídeos que já têm .srt e .palavras.json são pulados (dá para interromper e retomar), mas as
   falas deles continuam entrando no CSV.
 
 Uso:
@@ -14,6 +15,7 @@ Uso:
 
 import argparse
 import csv
+import json
 import re
 import shutil
 import subprocess
@@ -57,10 +59,10 @@ def listar_videos(raiz: Path, excluir=()):
     )
 
 
-def ler_audio(caminho: Path) -> np.ndarray:
+def ler_audio(caminho: Path, taxa: int = TAXA) -> np.ndarray:
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-i", str(caminho), "-vn", "-ac", "1", "-ar", str(TAXA),
+        "-i", str(caminho), "-vn", "-ac", "1", "-ar", str(taxa),
         "-f", "s16le", "-",
     ]
     proc = subprocess.run(cmd, capture_output=True)
@@ -106,7 +108,32 @@ def ler_srt(caminho: Path):
     return falas
 
 
+def caminho_palavras(video: Path) -> Path:
+    return video.with_name(video.stem + ".palavras.json")
+
+
+def escrever_palavras(video: Path, segmentos):
+    dados = {"segmentos": [
+        {"inicio": round(a, 2), "fim": round(b, 2), "texto": t,
+         "palavras": [[round(pa, 2), round(pb, 2), w] for pa, pb, w in ps]}
+        for a, b, t, ps in segmentos]}
+    tmp = caminho_palavras(video).with_suffix(".tmp")
+    tmp.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(caminho_palavras(video))
+
+
+def ler_palavras(video: Path):
+    """[(inicio, fim, texto, [(ini, fim, palavra), ...])] ou None se não houver o .palavras.json."""
+    arq = caminho_palavras(video)
+    if not arq.exists():
+        return None
+    dados = json.loads(arq.read_text(encoding="utf-8"))
+    return [(s["inicio"], s["fim"], s["texto"], [tuple(p) for p in s["palavras"]])
+            for s in dados["segmentos"]]
+
+
 def transcrever(modelo, audio, beam):
+    """Segmentos com o tempo de cada palavra: [(inicio, fim, texto, [(ini, fim, palavra)])]."""
     segmentos, info = modelo.transcribe(
         audio,
         language="pt",
@@ -114,8 +141,10 @@ def transcrever(modelo, audio, beam):
         vad_filter=True,  # corta vento/motor/silêncio e evita "alucinações"
         vad_parameters={"min_silence_duration_ms": 700},
         condition_on_previous_text=False,  # evita frases repetidas em loop
+        word_timestamps=True,  # permite cortar no fim exato da palavra e legenda palavra a palavra
     )
-    return [(s.start, s.end, s.text.strip()) for s in segmentos if s.text.strip()]
+    return [(s.start, s.end, s.text.strip(), [(w.start, w.end, w.word.strip()) for w in (s.words or [])])
+            for s in segmentos if s.text.strip()]
 
 
 def main():
@@ -157,10 +186,12 @@ def main():
         pescaria = video.parent.name if video.parent != raiz else video.stem
         rotulo = f"[{n}/{len(videos)}] {video.relative_to(raiz) if video.is_relative_to(raiz) else video}"
         try:
-            if srt.exists() and not args.refazer:
-                print(f"{rotulo} — já tem .srt, pulando")
+            if srt.exists() and caminho_palavras(video).exists() and not args.refazer:
+                print(f"{rotulo} — já transcrito, pulando")
                 falas = ler_srt(srt)
             else:
+                if srt.exists() and not args.refazer:
+                    print(f"{rotulo} — tem .srt mas falta o tempo por palavra, refazendo")
                 if modelo is None:
                     WhisperModel = importar_faster_whisper()
                     print(f"Carregando modelo '{args.modelo}' (na 1ª vez baixa da internet)...")
@@ -168,8 +199,10 @@ def main():
                 print(f"{rotulo} — transcrevendo...", flush=True)
                 ti = time.time()
                 audio = ler_audio(video)
-                falas = transcrever(modelo, audio, args.beam)
+                segmentos = transcrever(modelo, audio, args.beam)
+                falas = [(a, b, t) for a, b, t, _ in segmentos]
                 escrever_srt(srt, falas)
+                escrever_palavras(video, segmentos)
                 dur = len(audio) / TAXA
                 print(f"    {len(falas)} falas, {dur / 60:.1f} min de áudio em {(time.time() - ti) / 60:.1f} min")
             for ini, fim, texto in falas:

@@ -1,8 +1,11 @@
-"""Prepara os vídeos para o Claude "assistir": folhas de quadros + picos de áudio + fala.
+"""Prepara os vídeos para o Claude "assistir": quadros + fala + volume + sons identificados.
 
 Para cada vídeo cria, em <raiz>/Editados_IA/_analise/<video>/:
   - folha_01.jpg, folha_02.jpg...  grade de quadros com o tempo de cada um
-  - resumo.md                      duração, formato, momentos de áudio alto, falas do .srt
+  - resumo.md                      duração, formato, picos de volume (com o som provável),
+                                   sons identificados (carretilha, splash, grito...) e as
+                                   falas com o volume e a marca ★ quando parecem reação
+  - sons.json                      cache da classificação de sons (ver sons.py)
 E um índice geral em <raiz>/Editados_IA/_analise/indice.md.
 
 Uso:
@@ -12,6 +15,7 @@ Uso:
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -22,7 +26,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).parent))
-from transcrever_videos import PASTA_SAIDA, TAXA, ler_audio, ler_srt, listar_videos  # noqa: E402
+from transcrever_videos import (  # noqa: E402
+    PASTA_SAIDA, TAXA, caminho_palavras, ler_audio, ler_srt, listar_videos)
 
 COLUNAS, LINHAS = 4, 3
 LARGURA_QUADRO = 360
@@ -98,14 +103,25 @@ def montar_folhas(quadros, destino_base: Path):
     return folhas
 
 
-def picos_audio(audio: np.ndarray, janela=0.5, maximo=8):
-    """Trechos bem mais altos que o normal do vídeo (grito, comemoração, carretilha cantando...)."""
+REACOES = re.compile(
+    r"\b(pegou|fisgou|bateu|olha|olh[aá] isso|nossa|caramba|eita|vixe|meu deus|que peixe|"
+    r"monstro|grande|escapou|soltou|perdi|segura|puxa|vai|vem|isso|aí sim|toma)\b", re.I)
+
+
+def niveis_db(audio: np.ndarray, janela=0.5):
+    """Volume (dBFS) a cada `janela` segundos e a mediana do vídeo."""
     n = int(TAXA * janela)
     if len(audio) < n * 4:
-        return [], None
+        return None, None
     blocos = audio[: len(audio) // n * n].reshape(-1, n)
     db = 20 * np.log10(np.sqrt((blocos ** 2).mean(axis=1)) + 1e-9)
-    mediana = float(np.median(db))
+    return db, float(np.median(db))
+
+
+def picos_audio(db, mediana, janela=0.5, maximo=8):
+    """Trechos bem mais altos que o normal do vídeo (grito, comemoração, carretilha cantando...)."""
+    if db is None:
+        return []
     limiar = max(float(np.percentile(db, 90)), mediana + 8)
     trechos, atual = [], None
     for i, v in enumerate(db):
@@ -116,18 +132,77 @@ def picos_audio(audio: np.ndarray, janela=0.5, maximo=8):
                 atual = [i, i, v]
                 trechos.append(atual)
     trechos = sorted(trechos, key=lambda t: -t[2])[:maximo]
-    return sorted(((a * janela, (b + 1) * janela, v - mediana) for a, b, v in trechos)), mediana
+    return sorted((a * janela, (b + 1) * janela, v - mediana) for a, b, v in trechos)
 
 
-def analisar(video: Path, raiz: Path, pasta_analise: Path, refazer: bool) -> dict:
+def volume_trecho(db, mediana, ini, fim, janela=0.5):
+    """Volume máximo do trecho em dB acima da mediana (aproxima o tom: gritado x falado baixo)."""
+    if db is None:
+        return None
+    a, b = int(ini / janela), max(int(ini / janela) + 1, int(np.ceil(fim / janela)))
+    trecho = db[a:b]
+    return float(trecho.max() - mediana) if len(trecho) else None
+
+
+def eh_reacao(texto: str, volume) -> bool:
+    palavras = re.findall(r"\w+", texto.lower())
+    repetida = any(len(p) >= 3 and p == q for p, q in zip(palavras, palavras[1:]))  # "vai vai vai"
+    curta_exclamada = "!" in texto and len(palavras) <= 6
+    vol = volume or 0
+    return (bool(REACOES.search(texto)) and vol >= 6) or repetida or curta_exclamada or vol >= 12
+
+
+class Sons:
+    """Carrega o classificador de sons só quando algum vídeo precisar."""
+
+    def __init__(self, ligado: bool):
+        self.motivo = None if ligado else "desligado com --sem-sons"
+        self.cfg = self.clf = None
+        if ligado:
+            try:
+                import sons
+                self.mod = sons
+                self.motivo = sons.disponivel()
+                if self.motivo is None:
+                    self.cfg = sons.carregar_config()
+            except Exception as e:  # sons.json inválido etc.
+                self.motivo = f"erro ao preparar: {e}"
+        if self.motivo:
+            print(f"Sons NÃO serão identificados: {self.motivo}")
+
+    def janelas(self, video: Path, destino: Path):
+        """Janelas classificadas (com cache em destino/sons.json) ou None."""
+        if self.motivo:
+            return None
+        cache = destino / "sons.json"
+        if cache.exists():
+            dados = json.loads(cache.read_text(encoding="utf-8"))
+            if dados.get("assinatura") == self.cfg["assinatura"]:
+                return [tuple(j) for j in dados["janelas"]]
+        if self.clf is None:
+            print(f"    carregando modelo de sons {self.cfg['modelo']} (na 1ª vez baixa ~600 MB)...", flush=True)
+            self.clf = self.mod.ClassificadorSons(self.cfg)
+        jan = self.clf.classificar(ler_audio(video, self.mod.TAXA_CLAP))
+        cache.write_text(json.dumps({"assinatura": self.cfg["assinatura"], "janelas": jan},
+                                    ensure_ascii=False), encoding="utf-8")
+        return jan
+
+    def em_dia(self, destino: Path) -> bool:
+        if self.motivo:
+            return True
+        cache = destino / "sons.json"
+        return cache.exists() and json.loads(cache.read_text(encoding="utf-8")).get("assinatura") == self.cfg["assinatura"]
+
+
+def analisar(video: Path, raiz: Path, pasta_analise: Path, refazer: bool, sons: Sons) -> dict:
     rel = video.relative_to(raiz)
     destino = pasta_analise / re.sub(r"[^\w.-]+", "_", str(rel.with_suffix("")))
     resumo = destino / "resumo.md"
-    srt = video.with_suffix(".srt")
-    atual = resumo.exists() and not refazer and (
-        not srt.exists() or srt.stat().st_mtime <= resumo.stat().st_mtime)
+    srt, palavras = video.with_suffix(".srt"), caminho_palavras(video)
     info = info_video(video)
     falas = ler_srt(srt) if srt.exists() else []
+    atual = (resumo.exists() and not refazer and sons.em_dia(destino)
+             and all(not f.exists() or f.stat().st_mtime <= resumo.stat().st_mtime for f in (srt, palavras)))
     if atual:
         return {"rel": rel, "resumo": resumo, "falas": len(falas), "pulado": True, **info}
 
@@ -138,7 +213,9 @@ def analisar(video: Path, raiz: Path, pasta_analise: Path, refazer: bool) -> dic
     quadros = extrair_quadros(video, passo)
     folhas = montar_folhas(quadros, destino / "folha")
     w, h = quadros[0][1].size if quadros else (0, 0)
-    picos, mediana = picos_audio(ler_audio(video)) if info["tem_audio"] else ([], None)
+    db, mediana = niveis_db(ler_audio(video)) if info["tem_audio"] else (None, None)
+    picos = picos_audio(db, mediana)
+    janelas = sons.janelas(video, destino) if info["tem_audio"] else None
 
     linhas = [
         f"# {rel}", "",
@@ -146,18 +223,41 @@ def analisar(video: Path, raiz: Path, pasta_analise: Path, refazer: bool) -> dic
         f"- Duração: {mmss(info['duracao'])} ({info['duracao']:.1f} s)",
         f"- Formato: {'vertical' if h > w else 'horizontal' if w > h else 'quadrado'} ({w}x{h} na folha)",
         f"- Áudio: {'sim' if info['tem_audio'] else 'NÃO'}",
+        f"- Tempo por palavra: {'sim (cortes ajustados ao fim das palavras)' if palavras.exists() else 'não'}",
         f"- Quadros a cada {passo:.1f} s nas folhas:",
     ]
     linhas += [f"  - `{a.name}`: {mmss(t0)} a {mmss(t1)}" for a, t0, t1 in folhas]
+
     linhas += ["", "## Momentos de áudio alto"]
     if picos:
-        linhas.append(f"(dB acima do nível típico do vídeo, que é {mediana:.0f} dBFS)")
-        linhas += [f"- {mmss(a)}–{mmss(b)}: +{d:.0f} dB" for a, b, d in picos]
+        linhas.append(f"(dB acima do nível típico do vídeo, que é {mediana:.0f} dBFS; som provável entre colchetes)")
+        for a, b, d in picos:
+            som = sons.mod.som_em(janelas, sons.cfg, a, b) if janelas else None
+            linhas.append(f"- {mmss(a)}–{mmss(b)}: +{d:.0f} dB" + (f" [{som}]" if som else ""))
     else:
         linhas.append("- nenhum destaque" if info["tem_audio"] else "- vídeo sem áudio")
-    linhas += ["", "## Fala (do .srt)"]
-    linhas += [f"- [{mmss(a)}–{mmss(b)}] {t}" for a, b, t in falas] or [
-        "- sem .srt (rode a transcrição antes)" if not srt.exists() else "- nenhuma fala detectada"]
+
+    linhas += ["", "## Sons identificados"]
+    if janelas is None:
+        linhas.append(f"- não analisados ({sons.motivo or 'vídeo sem áudio'})")
+    else:
+        trechos = sons.mod.trechos_destaque(janelas, sons.cfg)
+        linhas += [f"- {mmss(a)}–{mmss(b)}: {nome} ({p:.0%})" for a, b, nome, p in trechos] or [
+            "- nenhum som de destaque (só fala calma, ambiente, motor ou vento)"]
+        fundo = {}
+        for a, b, nome, p in janelas:
+            fundo[nome] = fundo.get(nome, 0) + 1
+        linhas.append("- som predominante: " + ", ".join(
+            f"{n} {c / len(janelas):.0%}" for n, c in sorted(fundo.items(), key=lambda x: -x[1])[:3]))
+
+    linhas += ["", "## Fala (do .srt)",
+               "(+dB = volume da fala acima do típico; ★ = parece reação espontânea)"]
+    for a, b, t in falas:
+        vol = volume_trecho(db, mediana, a, b)
+        marca = " ★" if eh_reacao(t, vol) else ""
+        linhas.append(f"- [{mmss(a)}–{mmss(b)}]" + (f" (+{vol:.0f} dB)" if vol is not None else "") + f"{marca} {t}")
+    if not falas:
+        linhas.append("- sem .srt (rode a transcrição antes)" if not srt.exists() else "- nenhuma fala detectada")
     resumo.write_text("\n".join(linhas) + "\n", encoding="utf-8")
     return {"rel": rel, "resumo": resumo, "falas": len(falas), "pulado": False, **info}
 
@@ -169,10 +269,11 @@ def cmd_lote(args):
     if not videos:
         sys.exit(f"Nenhum vídeo encontrado em {raiz}")
     resultados, falhas = [], []
+    sons = Sons(not args.sem_sons)
     for n, v in enumerate(videos, 1):
         print(f"[{n}/{len(videos)}] {v.relative_to(raiz)}", flush=True)
         try:
-            resultados.append(analisar(v, raiz, pasta_analise, args.refazer))
+            resultados.append(analisar(v, raiz, pasta_analise, args.refazer, sons))
         except Exception as e:
             print(f"    ERRO: {e}")
             falhas.append((v, str(e)))
@@ -222,6 +323,7 @@ def main():
         ap.add_argument("pasta", type=Path)
         ap.add_argument("--excluir", nargs="+", default=[], metavar="PASTA")
         ap.add_argument("--refazer", action="store_true")
+        ap.add_argument("--sem-sons", action="store_true", help="não identifica sons (mais rápido)")
         cmd_lote(ap.parse_args())
 
 
